@@ -81,6 +81,7 @@ void main() {
       }
       expect(find.byKey(const Key('dashboard_balances_card')), findsOneWidget);
       expect(find.byKey(const Key('dashboard_username')), findsOneWidget);
+      expect(find.byKey(const Key('upi_scan_fab')), findsOneWidget, reason: 'UPI scan FAB should be visible on dashboard');
     } else {
       // Enter wrong OTP -> expect error snackbar
       await tester.enterText(find.byKey(const Key('otp_input')), '000000');

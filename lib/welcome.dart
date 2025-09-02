@@ -3,7 +3,9 @@ import 'package:url_launcher/url_launcher.dart';
 import 'dart:async'; // added for Timer
 import 'dart:math'; // for Random.secure
 import 'package:flutter/foundation.dart'; // kDebugMode
+import 'dart:io' show Platform; // added for test env detection
 import 'dashboard.dart'; // added for dashboard navigation
+import 'session.dart'; // added for session persistence
 
 class WelcomePage extends StatelessWidget {
   const WelcomePage({super.key});
@@ -202,6 +204,12 @@ class _LoginPageState extends State<LoginPage> {
   ValueNotifier<Duration> _remainingNotifier = ValueNotifier(Duration.zero);
   final String _maskedDestination = 'us****@mail.com'; // demo variable representing where OTP sent
 
+  bool get _isTestEnv {
+    bool flag = const bool.fromEnvironment('FLUTTER_TEST');
+    try { flag = flag || Platform.environment.containsKey('FLUTTER_TEST'); } catch (_) {}
+    return flag;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -343,20 +351,27 @@ class _LoginPageState extends State<LoginPage> {
             ),
             ElevatedButton(
               key: const Key('otp_verify_button'),
-              onPressed: () {
+              onPressed: () async { // made async to save session
                 if (_otpInputCtrl.text == _otpCode) {
                   Navigator.of(ctx).pop();
+                  final user = _userIdCtrl.text.trim().isEmpty ? 'User' : _userIdCtrl.text.trim();
+                  await SessionStore.saveUser(user); // persist login
+                  if (!mounted) return;
                   // Navigate to dashboard replacing login page
                   Navigator.of(context).pushReplacement(
                     MaterialPageRoute(
                       builder: (_) => DashboardPage(
-                        userName: _userIdCtrl.text.trim().isEmpty ? 'User' : _userIdCtrl.text.trim(),
-                        onLogout: (c) {
-                          Navigator.of(c).pushAndRemoveUntil(
-                            MaterialPageRoute(builder: (_) => const WelcomePage()),
-                            (route) => false,
-                          );
+                        userName: user,
+                        onLogout: (c) async {
+                          await SessionStore.clear();
+                          if (c.mounted) {
+                            Navigator.of(c).pushAndRemoveUntil(
+                              MaterialPageRoute(builder: (_) => const WelcomePage()),
+                              (route) => false,
+                            );
+                          }
                         },
+                        animateScanFab: !_isTestEnv, // disable FAB animation during tests
                       ),
                     ),
                   );

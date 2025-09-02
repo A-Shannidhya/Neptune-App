@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'dart:math' as math; // added for rotation math
 import 'theme.dart'; // added theme import
 import 'welcome.dart'; // import welcome page
+import 'dashboard.dart'; // added for auto-login navigation
+import 'session.dart'; // added for session persistence
+import 'utils/env.dart'; // added for test detection
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,13 +16,14 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final testMode = isInFlutterTest();
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Neptune Bank',
       theme: NeptuneTheme.light(),
       darkTheme: NeptuneTheme.dark(),
       themeMode: ThemeMode.system,
-      home: const SplashScreen(),
+      home: testMode ? const WelcomePage() : const SplashScreen(),
     );
   }
 }
@@ -40,19 +44,55 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
   late final Animation<double> _ringRotation;
   late final Animation<double> _gradientShift;
 
+  bool get _isTestEnv => isInFlutterTest();
+
   @override
   void initState() {
     super.initState();
-    _loopController = AnimationController(vsync: this, duration: const Duration(seconds: 6))..repeat();
+    _loopController = AnimationController(vsync: this, duration: const Duration(seconds: 6));
+    if (_isTestEnv) {
+      // Avoid infinite ticker in tests
+      _loopController.value = 0;
+    } else {
+      _loopController.repeat();
+    }
     _introController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400));
     _logoScale = CurvedAnimation(parent: _introController, curve: Curves.easeOutBack);
     _logoOpacity = CurvedAnimation(parent: _introController, curve: Curves.easeIn);
     _ringRotation = CurvedAnimation(parent: _loopController, curve: Curves.linear);
     _gradientShift = CurvedAnimation(parent: _loopController, curve: Curves.easeInOutSine);
     _introController.forward();
-    // Keep 5s splash then navigate
-    Future.delayed(const Duration(seconds: 5), () {
-      if (mounted) {
+    // Navigate (auto-login if session exists). In tests, do it immediately to let pumpAndSettle finish.
+    final delay = _isTestEnv ? const Duration(milliseconds: 1) : const Duration(seconds: 5);
+    Future.delayed(delay, () async {
+      if (!mounted) return;
+      if (_isTestEnv) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const WelcomePage()),
+        );
+        return;
+      }
+      final savedUser = await SessionStore.getUser();
+      if (!mounted) return;
+      if (savedUser != null) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => DashboardPage(
+              userName: savedUser,
+              onLogout: (c) async {
+                await SessionStore.clear();
+                if (c.mounted) {
+                  Navigator.of(c).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (_) => const WelcomePage()),
+                    (route) => false,
+                  );
+                }
+              },
+              animateScanFab: !_isTestEnv, // disable infinite FAB animation in tests
+            ),
+          ),
+        );
+      } else {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const WelcomePage()),
         );
@@ -134,18 +174,18 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                       ),
                     ),
                     const SizedBox(height: 40),
-                    // Minimal progress indicator referencing theme
-                    SizedBox(
-                      width: 54,
-                      child: AnimatedOpacity(
-                        opacity: _introController.isCompleted ? 1 : 0,
-                        duration: const Duration(milliseconds: 400),
-                        child: LinearProgressIndicator(
-                          minHeight: 4,
-                          borderRadius: BorderRadius.circular(4),
+                    if (!_isTestEnv) // hide indeterminate indicator during tests
+                      SizedBox(
+                        width: 54,
+                        child: AnimatedOpacity(
+                          opacity: _introController.isCompleted ? 1 : 0,
+                          duration: const Duration(milliseconds: 400),
+                          child: LinearProgressIndicator(
+                            minHeight: 4,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),

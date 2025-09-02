@@ -1,10 +1,66 @@
 import 'dart:ui' show ImageFilter; // added for blur effect
 import 'package:flutter/material.dart';
+import 'package:neptune/profile.dart';
+import 'package:neptune/upi_scanner_page.dart'; // Import the UPI scanner page
+import 'package:neptune/payment_page.dart'; // added for payment flow
+import 'package:neptune/api/config.dart'; // added
+import 'package:neptune/api/client.dart'; // added
+import 'package:neptune/session.dart'; // added
 
 class DashboardPage extends StatelessWidget {
   final String userName;
   final void Function(BuildContext context)? onLogout;
-  const DashboardPage({super.key, required this.userName, this.onLogout});
+  final bool animateScanFab; // new flag to disable infinite animation in tests
+  const DashboardPage({super.key, required this.userName, this.onLogout, this.animateScanFab = true});
+
+  Future<void> _showBackendSettings(BuildContext context) async {
+    final currentBase = await ApiConfig.getBaseUrl();
+    final currentToken = await ApiConfig.getAuthToken() ?? '';
+    final baseCtrl = TextEditingController(text: currentBase);
+    final tokenCtrl = TextEditingController(text: currentToken);
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Backend Settings'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: baseCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Spring Boot Base URL',
+                hintText: 'e.g. https://api.example.com or http://10.0.2.2:8080',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: tokenCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Auth token (optional)',
+                hintText: 'Paste JWT token if required',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () async {
+              await ApiConfig.setBaseUrl(baseCtrl.text.trim());
+              await ApiConfig.setAuthToken(tokenCtrl.text.trim().isEmpty ? null : tokenCtrl.text.trim());
+              if (context.mounted) {
+                Navigator.of(ctx).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Saved. Tap refresh on balances to sync.')),
+                );
+              }
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -13,9 +69,18 @@ class DashboardPage extends StatelessWidget {
       appBar: AppBar(
         leading: Padding(
           padding: const EdgeInsets.only(left: 8.0),
-          child: CircleAvatar(
-            backgroundColor: scheme.primary.withValues(alpha: 0.15),
-            child: Text('N', style: TextStyle(color: scheme.primary, fontWeight: FontWeight.bold)),
+          child: InkWell(
+            key: const Key('dashboard_profile_button'),
+            borderRadius: BorderRadius.circular(40),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => ProfilePage(fullName: userName)),
+              );
+            },
+            child: CircleAvatar(
+              backgroundColor: scheme.primary.withValues(alpha: 0.15),
+              child: Icon(Icons.person, color: scheme.primary),
+            ),
           ),
         ),
         title: Row(
@@ -39,6 +104,12 @@ class DashboardPage extends StatelessWidget {
             onPressed: () {
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No new notifications')));
             },
+          ),
+          IconButton(
+            key: const Key('dashboard_settings'),
+            tooltip: 'Backend Settings',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => _showBackendSettings(context),
           ),
           IconButton(
             key: const Key('dashboard_logout'),
@@ -75,9 +146,25 @@ class DashboardPage extends StatelessWidget {
             const _PayTransferSection(),
             const SizedBox(height: 28),
             const _UpiSection(),
+            const SizedBox(height: 28),
+            const _DepositsSection(),
+            const SizedBox(height: 28),
+            const _LoansSection(),
           ],
         ),
       ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButton: _UpiScanFab(onTap: () async {
+        final result = await Navigator.of(context).push<String>(
+          MaterialPageRoute(builder: (_) => const UpiQrScannerPage()),
+        );
+        if (result != null && context.mounted) {
+          // Navigate to payment page instead of simple snackbar
+          await Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => UpiPaymentPage(rawData: result)),
+          );
+        }
+      }, animate: animateScanFab),
     );
   }
 }
@@ -91,12 +178,63 @@ class _BalancesCard extends StatefulWidget {
 class _BalancesCardState extends State<_BalancesCard> {
   bool _hidden = false;
 
-  final Map<String, double> _balances = const {
+  final Map<String, double> _fallback = const {
     'Savings': 25430.75,
     'Overdraft': -1200.00,
     'Deposits': 8400.00,
     'Loans': 15000.00,
   };
+
+  Map<String, double> _balances = const {
+    'Savings': 25430.75,
+    'Overdraft': -1200.00,
+    'Deposits': 8400.00,
+    'Loans': 15000.00,
+  };
+
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBalances();
+  }
+
+  Future<String> _safeGetBaseUrl() async {
+    try { return await ApiConfig.getBaseUrl(); } catch (_) { return ''; }
+  }
+  Future<String?> _safeGetToken() async {
+    try { return await ApiConfig.getAuthToken(); } catch (_) { return null; }
+  }
+
+  Future<void> _loadBalances() async {
+    final baseUrl = await _safeGetBaseUrl();
+    if (baseUrl.isEmpty) {
+      setState(() { _error = null; _loading = false; _balances = _fallback; });
+      return;
+    }
+    setState(() { _loading = true; _error = null; });
+    try {
+      final userId = await SessionStore.getUser();
+      if (userId == null || userId.isEmpty) {
+        setState(() { _loading = false; });
+        return;
+      }
+      final token = await _safeGetToken();
+      final api = ApiClient(baseUrl: baseUrl, authToken: token);
+      final result = await api.fetchBalancesForUser(userId);
+      if (!mounted) return;
+      setState(() {
+        _balances = result.isNotEmpty ? result : _fallback;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _loading = false; _error = e.toString(); _balances = _fallback; });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Balance sync failed')));
+    }
+  }
 
   String _fmt(double v) {
     if (_hidden) return '•••••';
@@ -203,27 +341,53 @@ class _BalancesCardState extends State<_BalancesCard> {
                     ),
                   ),
                   const SizedBox(width: 16),
-                  Tooltip(
-                    message: _hidden ? 'Show amounts' : 'Hide amounts',
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(32),
-                      onTap: () => setState(() => _hidden = !_hidden),
-                      child: ClipOval(
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-                          child: Container(
-                            color: scheme.onPrimaryContainer.withValues(alpha: 0.10),
-                            padding: const EdgeInsets.all(10),
-                            child: Icon(
-                              _hidden ? Icons.visibility_off_rounded : Icons.visibility_rounded,
-                              size: 22,
-                              color: scheme.onPrimaryContainer,
-                              key: const Key('balances_toggle_button'),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Tooltip(
+                        message: _hidden ? 'Show amounts' : 'Hide amounts',
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(32),
+                          onTap: () => setState(() => _hidden = !_hidden),
+                          child: ClipOval(
+                            child: BackdropFilter(
+                              filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                              child: Container(
+                                color: Theme.of(context).colorScheme.onPrimaryContainer.withValues(alpha: 0.10),
+                                padding: const EdgeInsets.all(10),
+                                child: Icon(
+                                  _hidden ? Icons.visibility_off_rounded : Icons.visibility_rounded,
+                                  size: 22,
+                                  color: Theme.of(context).colorScheme.onPrimaryContainer,
+                                  key: const Key('balances_toggle_button'),
+                                ),
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
+                      const SizedBox(width: 8),
+                      if (_loading)
+                        SizedBox(width: 26, height: 26, child: CircularProgressIndicator(strokeWidth: 2.2))
+                      else
+                        Tooltip(
+                          message: 'Refresh balances',
+                          child: InkWell(
+                            onTap: _loadBalances,
+                            borderRadius: BorderRadius.circular(32),
+                            child: ClipOval(
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                                child: Container(
+                                  color: Theme.of(context).colorScheme.onPrimaryContainer.withValues(alpha: 0.10),
+                                  padding: const EdgeInsets.all(10),
+                                  child: const Icon(Icons.refresh_rounded, size: 20, key: Key('balances_refresh_button')),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               ),
@@ -295,6 +459,7 @@ class _PayTransferSection extends StatelessWidget {
   const _PayTransferSection();
 
   static final List<_ActionItem> _quickActions = [
+    _ActionItem('Scan QR', Icons.qr_code_scanner_rounded), // added scanner shortcut
     _ActionItem('Send Money', Icons.send_rounded),
     _ActionItem('Direct Pay', Icons.payments_rounded),
     _ActionItem('My Beneficiary', Icons.group_rounded),
@@ -302,13 +467,13 @@ class _PayTransferSection extends StatelessWidget {
     _ActionItem('BillPay', Icons.receipt_long_rounded),
     _ActionItem('Cardless Cash', Icons.smartphone_rounded),
     _ActionItem('Other Bank', Icons.account_balance_rounded),
-    _ActionItem('History', Icons.history_rounded),
   ];
 
   // Manage Accounts moved here per request; Donation removed previously
   static final List<_ActionItem> _extraActions = [
     _ActionItem('Manage Accounts', Icons.manage_accounts_rounded),
     _ActionItem('My Finance Management', Icons.pie_chart_rounded),
+    _ActionItem('History', Icons.history_rounded),
   ];
 
   void _showAll(BuildContext context) {
@@ -586,6 +751,212 @@ class _UpiSection extends StatelessWidget {
   }
 }
 
+class _DepositsSection extends StatelessWidget {
+  const _DepositsSection();
+
+  static final List<_ActionItem> _quickActions = [
+    _ActionItem('Fixed Deposit', Icons.savings_rounded),
+    _ActionItem('Recurring Deposit', Icons.autorenew_rounded),
+    _ActionItem('Certificates/Forms', Icons.description_rounded),
+    _ActionItem('Other Services', Icons.miscellaneous_services_rounded),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Deposits',
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.3,
+              ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Deposit products & services',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: scheme.onSurface.withValues(alpha: 0.65),
+              ),
+        ),
+        const SizedBox(height: 16),
+        LayoutBuilder(
+          builder: (ctx, constraints) {
+            const columns = 4; // exactly four options
+            const childAspect = 0.8;
+            return GridView.builder(
+              key: const Key('deposits_quick_grid'),
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _quickActions.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                mainAxisSpacing: 14,
+                crossAxisSpacing: 14,
+                childAspectRatio: childAspect,
+              ),
+              itemBuilder: (c, i) => _GridActionChip(item: _quickActions[i], color: scheme.primary),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _LoansSection extends StatelessWidget {
+  const _LoansSection();
+
+  // Quick grid now only first 8 options
+  static final List<_ActionItem> _quickActions = [
+    _ActionItem('Instant Overdraft', Icons.flash_on_rounded),
+    _ActionItem('Loan details', Icons.info_rounded),
+    _ActionItem('Loan Repayment', Icons.payments_rounded),
+    _ActionItem('Loan Account Statement', Icons.description_rounded),
+    _ActionItem('Loan Calculator', Icons.calculate_rounded),
+    _ActionItem('Pre-Close Loan against Deposit', Icons.lock_clock_rounded),
+    _ActionItem('Apply edu-loan', Icons.school_rounded),
+    _ActionItem('personal loan', Icons.person_rounded),
+  ];
+
+  // Extra sheet: moved car loan & gold loan here + existing extra
+  static final List<_ActionItem> _extraActions = [
+    _ActionItem('car loan', Icons.directions_car_rounded),
+    _ActionItem('gold loan', Icons.workspace_premium_rounded),
+    _ActionItem('Track Loan Application', Icons.track_changes_rounded),
+  ];
+
+  void _showAll(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: scheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Loans',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      icon: const Icon(Icons.close_rounded),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text('Loan Services', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600, letterSpacing: .4)),
+                const SizedBox(height: 10),
+                GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _quickActions.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 0.95,
+                  ),
+                  itemBuilder: (c, i) => _ActionTile(item: _quickActions[i]),
+                ),
+                if (_extraActions.isNotEmpty) ...[
+                  const SizedBox(height: 18),
+                  Text('More Loan Tools', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600, letterSpacing: .4)),
+                  const SizedBox(height: 10),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _extraActions.length,
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      mainAxisSpacing: 12,
+                      crossAxisSpacing: 12,
+                      childAspectRatio: 0.95,
+                    ),
+                    itemBuilder: (c, i) => _ActionTile(item: _extraActions[i]),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Loans',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                    ),
+              ),
+            ),
+            if (_extraActions.isNotEmpty)
+              TextButton(
+                key: const Key('loans_more_button'),
+                onPressed: () => _showAll(context),
+                child: const Text('More'),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Loan accounts & tools',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: scheme.onSurface.withValues(alpha: 0.65),
+              ),
+        ),
+        const SizedBox(height: 16),
+        LayoutBuilder(
+          builder: (ctx, constraints) {
+            const columns = 4; // grid for 10 items
+            const childAspect = 0.8;
+            return GridView.builder(
+              key: const Key('loans_quick_grid'),
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _quickActions.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                mainAxisSpacing: 14,
+                crossAxisSpacing: 14,
+                childAspectRatio: childAspect,
+              ),
+              itemBuilder: (c, i) => _GridActionChip(item: _quickActions[i], color: scheme.primary),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
 class _ActionItem {
   final String label;
   final IconData icon;
@@ -687,9 +1058,161 @@ class _GridActionChip extends StatelessWidget {
       ),
     );
   }
-  void _handleTap(BuildContext context) {
+  void _handleTap(BuildContext context) async {
+    // Open scanner directly for Scan QR actions
+    if (item.label == 'Scan QR') {
+      final result = await Navigator.of(context).push<String>(
+        MaterialPageRoute(builder: (_) => const UpiQrScannerPage()),
+      );
+      if (result != null && context.mounted) {
+        // Navigate to payment page instead of snackbar
+        await Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => UpiPaymentPage(rawData: result)),
+        );
+      }
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${item.label} (coming soon)')),
     );
   }
+}
+
+// Insert new animated FAB widget for UPI scanning
+class _UpiScanFab extends StatefulWidget {
+  final VoidCallback onTap;
+  final bool animate;
+  const _UpiScanFab({required this.onTap, this.animate = true});
+  @override
+  State<_UpiScanFab> createState() => _UpiScanFabState();
+}
+
+class _UpiScanFabState extends State<_UpiScanFab> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 3));
+    if (widget.animate) {
+      _controller.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      label: 'Scan UPI QR',
+      button: true,
+      child: GestureDetector(
+        key: const Key('upi_scan_fab'),
+        onTap: widget.onTap,
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (ctx, _) {
+            final t = _controller.isAnimating ? _controller.value : 0.0;
+            return _ScanFabVisual(t: t, scheme: scheme);
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _ScanFabVisual extends StatelessWidget {
+  final double t;
+  final ColorScheme scheme;
+  const _ScanFabVisual({required this.t, required this.scheme});
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 86,
+      height: 86,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: SweepGradient(
+                startAngle: 0,
+                endAngle: 6.28318,
+                colors: [
+                  scheme.primary.withValues(alpha: 0.05),
+                  scheme.primary.withValues(alpha: 0.20),
+                  scheme.secondary.withValues(alpha: 0.25),
+                  scheme.primary.withValues(alpha: 0.05),
+                ],
+                stops: [0, (t * 0.5 + 0.2) % 1, (t * 0.5 + 0.4) % 1, 1],
+                transform: GradientRotation(t * 6.28318),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: scheme.primary.withValues(alpha: 0.35),
+                  blurRadius: 22,
+                  spreadRadius: -4,
+                )
+              ],
+            ),
+          ),
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  scheme.primaryContainer.withValues(alpha: 0.85),
+                  scheme.secondaryContainer.withValues(alpha: 0.70),
+                ],
+              ),
+              border: Border.all(color: scheme.primary.withValues(alpha: 0.25), width: 1.2),
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(Icons.qr_code_scanner_rounded, size: 34, color: scheme.onPrimaryContainer),
+                Positioned.fill(
+                  child: ClipOval(
+                    child: CustomPaint(
+                      painter: _ScanPulsePainter(progress: t, color: scheme.primary),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ScanPulsePainter extends CustomPainter {
+  final double progress;
+  final Color color;
+  const _ScanPulsePainter({required this.progress, required this.color});
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..shader = LinearGradient(
+        colors: [color.withValues(alpha: 0), color.withValues(alpha: 0.15), color.withValues(alpha: 0)],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        stops: const [0, 0.5, 1],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
+    final lineY = (size.height) * progress;
+    canvas.drawRect(Rect.fromLTWH(0, lineY - 4, size.width, 8), paint);
+  }
+  @override
+  bool shouldRepaint(covariant _ScanPulsePainter oldDelegate) => oldDelegate.progress != progress || oldDelegate.color != color;
 }
