@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer subtle ring -->
+    <path
+        android:fillColor="#102A3D"
+        android:pathData="M54,4A50,50 0 1 1 53.999,4z"/>
+    <!-- Inner circle -->
+    <path
+        android:fillColor="#0F62FE"
+        android:pathData="M54,14A40,40 0 1 1 53.999,14z"/>
+    <!-- Stylized 'N' (trident-like) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="nonZero"
+        android:pathData="M38,74L38,34c0,-4 6,-4 6,0v22l20,-24c2.7,-3.2 7.6,0.6 5,4L59,56l15,16c3,3.2 -1.6,7.8 -4.8,4.8L50,60l-6,7v7c0,4 -6,4 -6,0z"/>
+    <!-- Accent highlight -->
+    <path
+        android:fillColor="#B3D1FF"
+        android:pathData="M54,14A40,40 0 0 1 89,54c0,1.5 -0.08,3 -0.24,4.5A34,34 0 0 0 54,20c-8.9,0 -17,3.5 -23,9.2 6,-9.9 16.9,-16.2 29,-15.2z"
+        android:fillAlpha="0.55"/>
+</vector>
+
